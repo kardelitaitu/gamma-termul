@@ -3,19 +3,27 @@ mod session;
 use std::sync::{Arc, Mutex};
 
 use session::{
-    NoopSessionSink, SessionConfig, SessionError, SessionId, SessionManager, SessionSnapshot,
+    DefaultSessionHandleFactory, SessionConfig, SessionError, SessionEvent, SessionEventSink,
+    SessionId, SessionManager, SessionSnapshot, SESSION_EVENT_CHANNEL,
 };
-use tauri::State;
+use tauri::{AppHandle, Emitter, Manager, State};
 
 type SharedSessionManager = Mutex<SessionManager>;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let sink = Arc::new(NoopSessionSink);
     tauri::Builder::default()
-        .manage(Mutex::new(SessionManager::new(sink)))
+        .setup(|app| {
+            let sink = Arc::new(TauriSessionSink::new(app.handle().clone()));
+            app.manage(Mutex::new(SessionManager::new(
+                sink,
+                Box::new(DefaultSessionHandleFactory),
+            )));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             create_session,
+            active_session,
             list_sessions,
             set_active_session,
             write_session,
@@ -24,6 +32,31 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run termul");
+}
+
+struct TauriSessionSink {
+    app: AppHandle,
+}
+
+impl TauriSessionSink {
+    fn new(app: AppHandle) -> Self {
+        Self { app }
+    }
+}
+
+impl SessionEventSink for TauriSessionSink {
+    fn emit(&self, event: SessionEvent) {
+        if let Err(err) = self.app.emit(SESSION_EVENT_CHANNEL, event) {
+            eprintln!("failed to emit session event: {err}");
+        }
+    }
+}
+
+#[tauri::command]
+fn active_session(
+    state: State<'_, SharedSessionManager>,
+) -> Result<Option<SessionSnapshot>, String> {
+    with_manager(state, |manager| manager.active_session())
 }
 
 #[tauri::command]
@@ -53,7 +86,9 @@ fn write_session(
     session_id: SessionId,
     input: String,
 ) -> Result<(), String> {
-    with_manager(state, |manager| manager.write_session(session_id, input.as_bytes()))
+    with_manager(state, |manager| {
+        manager.write_session(session_id, input.as_bytes())
+    })
 }
 
 #[tauri::command]
@@ -63,7 +98,9 @@ fn resize_session(
     cols: u16,
     rows: u16,
 ) -> Result<SessionSnapshot, String> {
-    with_manager(state, |manager| manager.resize_session(session_id, cols, rows))
+    with_manager(state, |manager| {
+        manager.resize_session(session_id, cols, rows)
+    })
 }
 
 #[tauri::command]

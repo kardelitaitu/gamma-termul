@@ -12,6 +12,9 @@
 - `TerminalView`: frontend renderer for output, selection, and focus
 - `ClipboardBridge`: copy/paste bridge between UI and OS clipboard
 - `SessionManager`: tab order, active tab, and session lifecycle
+- `active_session` command: frontend resync point for the currently focused tab
+- `termul:session-event`: global event channel for PTY output, exit, and errors
+- PTY output is base64-encoded on the event channel so the payload stays JSON-safe
 
 ## Session Model
 - One tab equals one shell session.
@@ -38,3 +41,4 @@
 - Use a PTY layer that supports Windows, macOS, and Linux.
 - Keep platform-specific code behind a small Rust abstraction.
 - Handle resize events from the frontend and forward them to the active PTY.
+- Use Tauri events for background session updates so the UI can subscribe without polling.

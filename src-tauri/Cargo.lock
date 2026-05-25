@@ -3284,8 +3284,10 @@ dependencies = [
 name = "termul-rust"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "portable-pty",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "thiserror 1.0.69",
