@@ -1584,15 +1584,21 @@ mod tests {
 
     #[test]
     fn base64_bytes_deserializes_valid_base64() {
-        let input = r#""SGVsbG8=""#; // "Hello" in base64, as JSON string
-        let result: Vec<u8> = serde_json::from_str(input).expect("deserialize base64");
-        assert_eq!(result, b"Hello");
+        // Test via SessionEvent::Output which has #[serde(with = "base64_bytes")]
+        let json = r#"{"kind":"output","session_id":1,"data":"SGVsbG8="}"#;
+        let event: SessionEvent = serde_json::from_str(json).expect("deserialize base64 output");
+        match event {
+            SessionEvent::Output { data, .. } => {
+                assert_eq!(data, b"Hello");
+            }
+            _ => panic!("expected Output variant"),
+        }
     }
 
     #[test]
     fn base64_bytes_rejects_invalid_base64() {
-        let input = r#""not-valid-base64!!""#;
-        let result: Result<Vec<u8>, _> = serde_json::from_str(input);
+        let json = r#"{"kind":"output","session_id":1,"data":"not-valid-base64!!"}"#;
+        let result: Result<SessionEvent, _> = serde_json::from_str(json);
         assert!(result.is_err(), "should reject invalid base64");
     }
 
