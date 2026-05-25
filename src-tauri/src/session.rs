@@ -1561,14 +1561,9 @@ mod tests {
 
     #[test]
     fn base64_bytes_roundtrip_encodes_decodes() {
-        use super::base64_bytes;
         let original = vec![0, 1, 2, 255, 127, 128, 10, 13];
-        let json = serde_json::to_string(&original).expect("serialize bytes via base64");
 
-        // Vec<u8> normally serializes as array of ints;
-        // but base64_bytes custom serializer encodes as base64 string.
-        // When applied via #[serde(with = "base64_bytes")], it becomes a string.
-        // We test via SessionEvent::Output which uses it.
+        // Test via SessionEvent::Output which uses #[serde(with = "base64_bytes")]
         let event = SessionEvent::Output {
             session_id: SessionId(1),
             data: original.clone(),
@@ -1576,10 +1571,10 @@ mod tests {
         let json = serde_json::to_string(&event).expect("serialize output event");
         assert!(json.contains("\"kind\":\"output\""));
 
-        let deserialized: SessionEvent = serde_json::from_str(&json).expect("deserialize output event");
+        let deserialized: SessionEvent =
+            serde_json::from_str(&json).expect("deserialize output event");
         match deserialized {
             SessionEvent::Output { data, .. } => {
-                // Compare using starts_with because data may have length prefix
                 assert_eq!(data.len(), original.len());
                 assert_eq!(data, original);
             }
@@ -1589,12 +1584,16 @@ mod tests {
 
     #[test]
     fn base64_bytes_deserializes_valid_base64() {
-        // Manual test of the deserialize function
-        use serde::Deserialize as _;
-        let json = serde_json::json!("SGVsbG8="); // "Hello" in base64
-        let mut de = serde_json::Deserializer::from_str(&json.to_string());
-        let result: Vec<u8> = base64_bytes::deserialize(&mut de).unwrap();
+        let input = r#""SGVsbG8=""#; // "Hello" in base64, as JSON string
+        let result: Vec<u8> = serde_json::from_str(input).expect("deserialize base64");
         assert_eq!(result, b"Hello");
+    }
+
+    #[test]
+    fn base64_bytes_rejects_invalid_base64() {
+        let input = r#""not-valid-base64!!""#;
+        let result: Result<Vec<u8>, _> = serde_json::from_str(input);
+        assert!(result.is_err(), "should reject invalid base64");
     }
 
     // -----------------------------------------------------------------------
