@@ -909,6 +909,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "gamma-termul"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "gdk"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3278,19 +3291,6 @@ checksum = "c4790fc369d5a530f4b544b094e31388b9b3a37c0f4652ade4505945f5660d24"
 dependencies = [
  "new_debug_unreachable",
  "utf-8",
-]
-
-[[package]]
-name = "termul-rust"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "portable-pty",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "thiserror 1.0.69",
 ]
 
 [[package]]

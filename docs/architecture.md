@@ -13,8 +13,11 @@
 - `ClipboardBridge`: copy/paste bridge between UI and OS clipboard
 - `SessionManager`: tab order, active tab, and session lifecycle
 - `active_session` command: frontend resync point for the currently focused tab
+- `rename_session` command: persist a custom tab label
 - `termul:session-event`: global event channel for PTY output, exit, and errors
 - PTY output is base64-encoded on the event channel so the payload stays JSON-safe
+- Portable config lives beside the executable as `{exe}.config`
+- The config keeps one directory and one optional title per tab plus the active tab index for restore
 
 ## Session Model
 - One tab equals one shell session.
@@ -36,6 +39,7 @@
 - Persist tab metadata only.
 - Do not persist live PTY process state.
 - Restore the last known layout and reopen sessions only if recovery is safe.
+- Keep window bounds, terminal preferences, tab directories, and tab titles in JSON, not in app data folders.
 
 ## Platform Notes
 - Use a PTY layer that supports Windows, macOS, and Linux.

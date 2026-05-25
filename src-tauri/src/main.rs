@@ -1,3 +1,3 @@
 fn main() {
-    termul_rust::run();
+    gamma_termul::run();
 }

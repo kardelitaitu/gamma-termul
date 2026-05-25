@@ -14,8 +14,10 @@ Build a desktop terminal in Rust with Tauri that feels easy to use and reliable.
 | `Ctrl+V` paste | Paste plain text into the active session and normalize line endings before write. | Let the browser/webview handle paste by default. | Rich text or focus bugs can break shell input. |
 | Tab switching | Switch only the active session pointer and keep inactive sessions alive. Promote the nearest tab on close. | Suspend inactive sessions. | Switching becomes slow or unstable if state is recreated often. |
 | Tab close/open | Close only the selected session process tree, then remove its id from the tab order. New tabs open as active by default. | Delay close until process exit is observed. | Orphaned shells or stuck tabs if cleanup is not strict. |
+| Tab rename | Store an optional title per tab in portable config and let the tab strip edit titles inline, then refresh from Rust after save. | Use a prompt-only rename flow. | UI and backend can drift if refresh is skipped after a rename. |
 | Scrollback | Keep a bounded ring buffer per tab and render from that buffer for scroll and selection. | Unlimited history. | Memory growth and slower rendering over time. |
 | Resize | Debounce window resize events and forward the final size to the active PTY immediately. | Resize only on focus changes. | The shell viewport can desync from the UI size. |
+| Portable config | Store JSON next to the executable as `{exe}.config` and keep window, terminal, tab directories, and tab titles there. | Use app data folders or registry storage. | The app stops feeling portable if state is split across system locations. |
 | Persistence | Save metadata only, not live process state. Restore layout and tab order, not running shells. | Try to restore live sessions. | Recovery becomes unreliable and hard to test. |
 
 ## Locked Rules

@@ -165,6 +165,7 @@ pub struct SessionManager {
     active: Option<SessionId>,
     order: Vec<SessionId>,
     sessions: HashMap<SessionId, Box<dyn SessionHandleTrait>>,
+    title_overrides: HashMap<SessionId, String>,
     sink: Arc<dyn SessionEventSink>,
     factory: Box<dyn SessionHandleFactory>,
 }
@@ -176,6 +177,7 @@ impl SessionManager {
             active: None,
             order: Vec::new(),
             sessions: HashMap::new(),
+            title_overrides: HashMap::new(),
             sink,
             factory,
         }
@@ -195,15 +197,15 @@ impl SessionManager {
         self.order.push(session_id);
         self.active = Some(session_id);
 
-        self.snapshot_for(session_id, true)
+        self.snapshot_for(session_id)
     }
 
     pub fn list_sessions(&self) -> Result<Vec<SessionSnapshot>, SessionError> {
         let mut sessions = Vec::with_capacity(self.order.len());
 
         for session_id in &self.order {
-            if let Some(handle) = self.sessions.get(session_id) {
-                sessions.push(handle.snapshot(*session_id, self.active == Some(*session_id)));
+            if self.sessions.contains_key(session_id) {
+                sessions.push(self.snapshot_for(*session_id)?);
             }
         }
 
@@ -215,7 +217,7 @@ impl SessionManager {
             return Ok(None);
         };
 
-        Ok(Some(self.snapshot_for(session_id, true)?))
+        Ok(Some(self.snapshot_for(session_id)?))
     }
 
     pub fn set_active_session(
@@ -227,7 +229,7 @@ impl SessionManager {
         }
 
         self.active = Some(session_id);
-        self.snapshot_for(session_id, true)
+        self.snapshot_for(session_id)
     }
 
     pub fn write_session(
@@ -254,7 +256,7 @@ impl SessionManager {
             .get(&session_id)
             .ok_or(SessionError::NotFound(session_id))?;
         session.resize(cols, rows)?;
-        self.snapshot_for(session_id, self.active == Some(session_id))
+        self.snapshot_for(session_id)
     }
 
     pub fn close_session(&mut self, session_id: SessionId) -> Result<(), SessionError> {
@@ -268,22 +270,43 @@ impl SessionManager {
 
         let next_active = self.choose_active_after_close(session_id);
         self.sessions.remove(&session_id);
+        self.title_overrides.remove(&session_id);
         self.order.retain(|id| *id != session_id);
         self.active = next_active;
 
         Ok(())
     }
 
-    fn snapshot_for(
-        &self,
+    pub fn rename_session(
+        &mut self,
         session_id: SessionId,
-        active: bool,
+        title: String,
     ) -> Result<SessionSnapshot, SessionError> {
+        if !self.sessions.contains_key(&session_id) {
+            return Err(SessionError::NotFound(session_id));
+        }
+
+        let cleaned = title.trim().to_string();
+        if cleaned.is_empty() {
+            self.title_overrides
+                .insert(session_id, default_title(session_id));
+        } else {
+            self.title_overrides.insert(session_id, cleaned);
+        }
+
+        self.snapshot_for(session_id)
+    }
+
+    fn snapshot_for(&self, session_id: SessionId) -> Result<SessionSnapshot, SessionError> {
         let session = self
             .sessions
             .get(&session_id)
             .ok_or(SessionError::NotFound(session_id))?;
-        Ok(session.snapshot(session_id, active))
+        let mut snapshot = session.snapshot(session_id, self.active == Some(session_id));
+        if let Some(title) = self.title_overrides.get(&session_id) {
+            snapshot.title = title.clone();
+        }
+        Ok(snapshot)
     }
 
     fn choose_active_after_close(&self, closing: SessionId) -> Option<SessionId> {
@@ -533,7 +556,7 @@ fn exit_info(status: &ExitStatus) -> ExitInfo {
     }
 }
 
-fn default_title(session_id: SessionId) -> String {
+pub(crate) fn default_title(session_id: SessionId) -> String {
     format!("Tab {}", session_id.0)
 }
 
@@ -1178,6 +1201,23 @@ mod tests {
         assert_eq!(active.cwd, Some(PathBuf::from("/work")));
     }
 
+    #[test]
+    fn rename_session_updates_snapshot_title() {
+        let mut manager = make_manager();
+        manager.create_session(SessionConfig::default()).unwrap();
+
+        let renamed = manager
+            .rename_session(SessionId(1), "Docs".into())
+            .expect("rename should succeed");
+        assert_eq!(renamed.title, "Docs");
+
+        let active = manager.active_session().unwrap().unwrap();
+        assert_eq!(active.title, "Docs");
+
+        let sessions = manager.list_sessions().unwrap();
+        assert_eq!(sessions[0].title, "Docs");
+    }
+
     // -----------------------------------------------------------------------
     // SessionManager: close_session — tab promotion
     // -----------------------------------------------------------------------
@@ -1628,11 +1668,13 @@ mod tests {
 
     #[test]
     fn session_config_deserializes_env_map() {
-        let cfg: SessionConfig = serde_json::from_str(
-            r#"{"env": {"TERM": "xterm-256color", "PATH": "/usr/bin"}}"#,
-        )
-        .expect("with env");
-        assert_eq!(cfg.env.get("TERM").map(String::as_str), Some("xterm-256color"));
+        let cfg: SessionConfig =
+            serde_json::from_str(r#"{"env": {"TERM": "xterm-256color", "PATH": "/usr/bin"}}"#)
+                .expect("with env");
+        assert_eq!(
+            cfg.env.get("TERM").map(String::as_str),
+            Some("xterm-256color")
+        );
         assert_eq!(cfg.env.get("PATH").map(String::as_str), Some("/usr/bin"));
     }
 
@@ -1746,5 +1788,386 @@ mod tests {
         assert!(snap.running);
         assert_eq!(snap.process_id, Some(777));
         assert!(snap.exit.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Error propagation: write/resize/close failures
+    // -----------------------------------------------------------------------
+
+    /// Mock handle whose write() always fails with a known error.
+    struct FailingWriteHandle;
+
+    impl SessionHandleTrait for FailingWriteHandle {
+        fn snapshot(&self, session_id: SessionId, active: bool) -> SessionSnapshot {
+            MockSessionHandle::running().snapshot(session_id, active)
+        }
+        fn write(&self, _input: &[u8]) -> Result<(), SessionError> {
+            Err(SessionError::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "write refused",
+            )))
+        }
+        fn resize(&self, _cols: u16, _rows: u16) -> Result<(), SessionError> {
+            Ok(())
+        }
+        fn request_close(&self) -> Result<(), SessionError> {
+            Ok(())
+        }
+        fn is_running(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn write_error_propagates_through_manager() {
+        struct WritesFailFactory;
+        impl SessionHandleFactory for WritesFailFactory {
+            fn spawn(
+                &self,
+                _: SessionId,
+                _: SessionConfig,
+                _: Arc<dyn SessionEventSink>,
+            ) -> Result<Box<dyn SessionHandleTrait>, SessionError> {
+                Ok(Box::new(FailingWriteHandle))
+            }
+        }
+
+        let mut mgr = make_manager_with_factory(Box::new(WritesFailFactory));
+        mgr.create_session(SessionConfig::default()).unwrap();
+        let err = mgr
+            .write_session(SessionId(1), b"fail")
+            .expect_err("should propagate write error");
+        assert!(
+            matches!(&err, SessionError::Io(e) if e.kind() == std::io::ErrorKind::BrokenPipe),
+            "expected Io(BrokenPipe), got {err}"
+        );
+    }
+
+    #[test]
+    fn resize_error_propagates_through_manager() {
+        struct FailingResizeHandle;
+        impl SessionHandleTrait for FailingResizeHandle {
+            fn snapshot(&self, session_id: SessionId, active: bool) -> SessionSnapshot {
+                MockSessionHandle::running().snapshot(session_id, active)
+            }
+            fn write(&self, _input: &[u8]) -> Result<(), SessionError> {
+                Ok(())
+            }
+            fn resize(&self, _cols: u16, _rows: u16) -> Result<(), SessionError> {
+                Err(SessionError::Pty("resize rejected".into()))
+            }
+            fn request_close(&self) -> Result<(), SessionError> {
+                Ok(())
+            }
+            fn is_running(&self) -> bool {
+                true
+            }
+        }
+
+        struct ResizeFailsFactory;
+        impl SessionHandleFactory for ResizeFailsFactory {
+            fn spawn(
+                &self,
+                _: SessionId,
+                _: SessionConfig,
+                _: Arc<dyn SessionEventSink>,
+            ) -> Result<Box<dyn SessionHandleTrait>, SessionError> {
+                Ok(Box::new(FailingResizeHandle))
+            }
+        }
+
+        let mut mgr = make_manager_with_factory(Box::new(ResizeFailsFactory));
+        mgr.create_session(SessionConfig::default()).unwrap();
+        let err = mgr
+            .resize_session(SessionId(1), 80, 24)
+            .expect_err("should propagate resize error");
+        assert!(
+            matches!(&err, SessionError::Pty(msg) if msg == "resize rejected"),
+            "expected Pty error, got {err}"
+        );
+    }
+
+    #[test]
+    fn close_error_propagates_through_manager() {
+        struct FailingCloseHandle;
+        impl SessionHandleTrait for FailingCloseHandle {
+            fn snapshot(&self, session_id: SessionId, active: bool) -> SessionSnapshot {
+                MockSessionHandle::running().snapshot(session_id, active)
+            }
+            fn write(&self, _input: &[u8]) -> Result<(), SessionError> {
+                Ok(())
+            }
+            fn resize(&self, _cols: u16, _rows: u16) -> Result<(), SessionError> {
+                Ok(())
+            }
+            fn request_close(&self) -> Result<(), SessionError> {
+                Err(SessionError::Pty("kill refused".into()))
+            }
+            fn is_running(&self) -> bool {
+                true
+            }
+        }
+
+        struct CloseFailsFactory;
+        impl SessionHandleFactory for CloseFailsFactory {
+            fn spawn(
+                &self,
+                _: SessionId,
+                _: SessionConfig,
+                _: Arc<dyn SessionEventSink>,
+            ) -> Result<Box<dyn SessionHandleTrait>, SessionError> {
+                Ok(Box::new(FailingCloseHandle))
+            }
+        }
+
+        let mut mgr = make_manager_with_factory(Box::new(CloseFailsFactory));
+        mgr.create_session(SessionConfig::default()).unwrap();
+        let err = mgr
+            .close_session(SessionId(1))
+            .expect_err("should propagate close error");
+        assert!(
+            matches!(&err, SessionError::Pty(msg) if msg == "kill refused"),
+            "expected Pty error, got {err}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Idempotency: close already-closed session
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn closing_same_session_twice_returns_not_found_second_time() {
+        let mut manager = make_manager();
+        create_n(&mut manager, 1);
+        manager.close_session(SessionId(1)).unwrap();
+        let err = manager
+            .close_session(SessionId(1))
+            .expect_err("second close should fail");
+        assert!(matches!(err, SessionError::NotFound(SessionId(1))));
+    }
+
+    #[test]
+    fn close_preserves_active_when_closing_non_existent() {
+        let mut manager = make_manager();
+        create_n(&mut manager, 2);
+        let err = manager
+            .close_session(SessionId(99))
+            .expect_err("should fail");
+        assert!(matches!(err, SessionError::NotFound(SessionId(99))));
+        // Active tab should remain unchanged
+        assert_eq!(manager.active, Some(SessionId(2)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Stale / defensive: list_sessions with missing order entries
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn list_sessions_skips_sessions_in_order_but_not_in_sessions() {
+        // Simulate a stale order entry by constructing a manager with
+        // order referencing an ID not in the sessions map.
+        let sink: Arc<dyn SessionEventSink> = Arc::new(MockSessionEventSink);
+        let factory: Box<dyn SessionHandleFactory> = Box::new(MockFactory);
+        let mut manager = SessionManager::new(sink, factory);
+
+        // Manually create a session
+        let snap = manager.create_session(SessionConfig::default()).unwrap();
+        assert_eq!(snap.id, SessionId(1));
+
+        // Manually add a stale reference in order
+        manager.order.push(SessionId(99));
+
+        // list_sessions should only return SessionId(1) and skip SessionId(99)
+        let sessions = manager.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, SessionId(1));
+    }
+
+    #[test]
+    fn list_sessions_skips_multiple_stale_entries() {
+        let sink: Arc<dyn SessionEventSink> = Arc::new(MockSessionEventSink);
+        let factory: Box<dyn SessionHandleFactory> = Box::new(MockFactory);
+        let mut manager = SessionManager::new(sink, factory);
+        create_n(&mut manager, 2);
+
+        // Inject stale entries
+        manager.order.push(SessionId(99));
+        manager.order.push(SessionId(100));
+
+        let sessions = manager.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].id, SessionId(1));
+        assert_eq!(sessions[1].id, SessionId(2));
+    }
+
+    // -----------------------------------------------------------------------
+    // s6d: independent session isolation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sessions_are_independent_close_one_does_not_affect_another() {
+        let mut manager = make_manager();
+        create_n(&mut manager, 3);
+
+        // Close middle session and verify the others are untouched
+        manager.set_active_session(SessionId(1)).unwrap();
+        manager.close_session(SessionId(2)).unwrap();
+
+        let sessions = manager.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].id, SessionId(1));
+        assert_eq!(sessions[1].id, SessionId(3));
+
+        // Session 1 remains active
+        assert!(sessions[0].active);
+        assert!(!sessions[1].active);
+    }
+
+    // -----------------------------------------------------------------------
+    // Poisoned state lock — snapshot fallback
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn poisoned_mutex_snapshot_fallback_uses_defaults() {
+        // Create a poisoned Arc<Mutex<SessionState>>
+        let state = Arc::new(Mutex::new(SessionState {
+            title: "original".into(),
+            shell: "original-shell".into(),
+            args: vec!["-o".into()],
+            cwd: Some(PathBuf::from("/original")),
+            cols: 200,
+            rows: 100,
+            running: true,
+            process_id: Some(1),
+            exit: None,
+        }));
+
+        // Poison the mutex by panicking while holding the lock in another thread
+        let poisoned = Arc::clone(&state);
+        let handle = std::thread::spawn(move || {
+            let _guard = poisoned.lock().unwrap();
+            panic!("intentional poison");
+        });
+        assert!(handle.join().is_err());
+        // state is now poisoned — lock() returns Err(PoisonError...)
+
+        // Now use mock handle's snapshot fallback
+        let mock = MockSessionHandle {
+            state: Arc::clone(&state),
+            written: Arc::new(Mutex::new(Vec::new())),
+            kill_called: Arc::new(Mutex::new(false)),
+        };
+        let snap = mock.snapshot(SessionId(1), true);
+
+        // The poisoned fallback should use defaults
+        assert_eq!(snap.id, SessionId(1));
+        assert_eq!(snap.title, "Tab 1");
+        assert_eq!(snap.cols, 80);
+        assert_eq!(snap.rows, 24);
+        assert!(!snap.running);
+        assert!(snap.cwd.is_none());
+        assert!(snap.process_id.is_none());
+        assert!(snap.exit.is_none());
+        assert!(snap.active);
+    }
+
+    // -----------------------------------------------------------------------
+    // SESSION_EVENT_CHANNEL constant
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn session_event_channel_is_well_named() {
+        assert_eq!(SESSION_EVENT_CHANNEL, "termul:session-event");
+    }
+
+    // -----------------------------------------------------------------------
+    // default_shell returns something on every platform
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn default_shell_is_non_empty() {
+        let shell = default_shell();
+        assert!(!shell.is_empty(), "default_shell() returned empty string");
+    }
+
+    // -----------------------------------------------------------------------
+    // SessionManager: repeated operations edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn write_then_activate_another_then_write() {
+        let mut manager = make_manager();
+        create_n(&mut manager, 2);
+        manager.set_active_session(SessionId(1)).unwrap();
+        // Write to both sessions — should not error
+        manager.write_session(SessionId(1), b"a").unwrap();
+        manager.write_session(SessionId(2), b"b").unwrap();
+        assert_eq!(manager.active, Some(SessionId(1)));
+    }
+
+    #[test]
+    fn resize_then_close_then_create_same_id_no_clash() {
+        let mut manager = make_manager();
+        create_n(&mut manager, 3);
+        manager.resize_session(SessionId(2), 200, 100).unwrap();
+        manager.close_session(SessionId(2)).unwrap();
+        // New session gets ID 4, not 2
+        let snap = manager.create_session(SessionConfig::default()).unwrap();
+        assert_eq!(snap.id, SessionId(4));
+    }
+
+    #[test]
+    fn multiple_resizes_in_sequence() {
+        let mut manager = make_manager();
+        create_n(&mut manager, 1);
+
+        let s = manager.resize_session(SessionId(1), 80, 24).unwrap();
+        assert_eq!(s.cols, 80);
+        assert_eq!(s.rows, 24);
+
+        let s = manager.resize_session(SessionId(1), 132, 43).unwrap();
+        assert_eq!(s.cols, 132);
+        assert_eq!(s.rows, 43);
+
+        let s = manager.resize_session(SessionId(1), 200, 80).unwrap();
+        assert_eq!(s.cols, 200);
+        assert_eq!(s.rows, 80);
+    }
+
+    #[test]
+    fn close_then_close_other_then_list() {
+        let mut manager = make_manager();
+        create_n(&mut manager, 4);
+        manager.close_session(SessionId(2)).unwrap();
+        manager.close_session(SessionId(4)).unwrap();
+        let sessions = manager.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].id, SessionId(1));
+        assert_eq!(sessions[1].id, SessionId(3));
+    }
+
+    // -----------------------------------------------------------------------
+    // rename_session edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rename_session_empty_title_uses_fallback() {
+        let mut manager = make_manager();
+        create_n(&mut manager, 1);
+
+        let snap = manager
+            .rename_session(SessionId(1), String::new())
+            .expect("rename with empty");
+        // Empty title falls back to default "Tab N"
+        assert_eq!(snap.title, "Tab 1");
+    }
+
+    #[test]
+    fn rename_session_non_existent_returns_error() {
+        let mut manager = make_manager();
+        let err = manager
+            .rename_session(SessionId(99), "new-name".into())
+            .expect_err("should fail");
+        assert!(matches!(err, SessionError::NotFound(SessionId(99))));
     }
 }
