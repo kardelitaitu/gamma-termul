@@ -1,0 +1,15 @@
+[package]
+name = "termul-rust"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+portable-pty = "0.9"
+serde = { version = "1", features = ["derive"] }
+tauri = "2"
+thiserror = "1"
+
+[build-dependencies]
+tauri-build = "2"
+
